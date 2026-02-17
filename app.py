@@ -151,7 +151,7 @@ def generate_post(thema: str, platformen: list[str], num: int) -> dict[str, Any]
     clamped_num = max(3, min(5, num))
     selected_in_order = [platform for platform in PLATFORM_ORDER if platform in set(platformen)]
 
-    client = OpenAI(api_key=OPENAI_API_KEY)
+    client = OpenAI(api_key=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)
     posts: list[dict[str, Any]] = []
 
     for platform in selected_in_order:

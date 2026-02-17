@@ -4,8 +4,13 @@ import re
 from typing import Any
 
 import streamlit as st
-from dotenv import load_dotenv
-from openai import APIConnectionError, APIStatusError, AuthenticationError, OpenAI, RateLimitError
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    AuthenticationError,
+    OpenAI,
+    RateLimitError,
+)
 
 PFLEGETHEMEN: dict[str, str] = {
     "Demenz": (
@@ -47,8 +52,15 @@ PLATTFORMEN: dict[str, str] = {
 
 PLATFORM_ORDER: tuple[str, ...] = ("TikTok", "Instagram", "Facebook")
 
-load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if os.path.exists(".env"):
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv()
+        OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+    except ImportError:
+        pass
 
 
 def _split_csv_like(value: str) -> list[str]:
@@ -191,7 +203,7 @@ def generate_post(thema: str, platformen: list[str], num: int) -> dict[str, Any]
     clamped_num = max(3, min(5, num))
     selected_in_order = [platform for platform in PLATFORM_ORDER if platform in set(platformen)]
 
-    client = OpenAI()
+    client = OpenAI(api_key=OPENAI_API_KEY)
     posts: list[dict[str, Any]] = []
     warnings: list[str] = []
 
@@ -250,7 +262,14 @@ def main() -> None:
     st.title("🤖 Pflege-Post Generator")
 
     if not OPENAI_API_KEY:
-        st.error("OPENAI_API_KEY fehlt. Bitte Umgebungsvariable setzen, dann die Seite neu laden.")
+        st.error(
+            "❌ OPENAI_API_KEY fehlt.\n"
+            "Lokal: .env mit OPENAI_API_KEY anlegen.\n"
+            "Cloud: In Streamlit → Manage app → Secrets setzen."
+        )
+        st.stop()
+
+    st.success("✅ OpenAI bereit!")
 
     thema = st.selectbox("Pflege-Thema", options=list(PFLEGETHEMEN.keys()))
     platformen = st.multiselect("Plattformen", options=list(PLATTFORMEN.keys()))

@@ -11,13 +11,6 @@ from typing import Any
 
 import openai
 import streamlit as st
-from openai import (
-    APIConnectionError,
-    APIStatusError,
-    AuthenticationError,
-    OpenAI,
-    RateLimitError,
-)
 
 PFLEGETHEMEN: dict[str, str] = {
     "Demenz": (
@@ -71,13 +64,21 @@ def _split_csv_like(value: str) -> list[str]:
 def _normalize_hashtags(value: str) -> list[str]:
     tags = _split_csv_like(value)
     normalized: list[str] = []
+    seen: set[str] = set()
     for tag in tags:
         clean = tag.strip()
         if not clean:
             continue
-        if not clean.startswith("#"):
-            clean = f"#{clean.lstrip('#')}"
-        normalized.append(clean)
+        token = re.sub(r"^#+", "", clean).strip()
+        token = re.sub(r"[\s,;|]+", "", token)
+        if not token or not re.search(r"\w", token):
+            continue
+
+        normalized_tag = f"#{token}"
+        if normalized_tag in seen:
+            continue
+        seen.add(normalized_tag)
+        normalized.append(normalized_tag)
     return normalized
 
 
@@ -144,6 +145,38 @@ def _build_prompt(thema: str, platform: str, num: int) -> str:
     )
 
 
+def _build_openai_error_response(exc: Exception, platform: str) -> dict[str, str]:
+    debug_hint = f"[{type(exc).__name__}]"
+
+    if isinstance(exc, AuthenticationError):
+        message = (
+            "Die Anfrage an OpenAI konnte nicht authentifiziert werden. "
+            "Bitte API-Schlüssel prüfen und erneut versuchen."
+        )
+    elif isinstance(exc, RateLimitError):
+        message = (
+            "Zu viele Anfragen in kurzer Zeit. "
+            "Bitte kurz warten und die Generierung erneut starten."
+        )
+    elif isinstance(exc, APIConnectionError):
+        message = (
+            "Verbindungsproblem zur OpenAI-API. "
+            "Bitte Internetverbindung prüfen und erneut versuchen."
+        )
+    elif isinstance(exc, APIStatusError):
+        message = (
+            "OpenAI konnte die Anfrage aktuell nicht verarbeiten. "
+            "Bitte später erneut versuchen."
+        )
+    else:
+        message = "Die Anfrage an OpenAI ist fehlgeschlagen. Bitte erneut versuchen."
+
+    return {
+        "error": f"{message} (Plattform: {platform}, Hinweis: {debug_hint})",
+        "debug": str(exc),
+    }
+
+
 def generate_post(thema: str, platformen: list[str], num: int) -> dict[str, Any]:
     if thema not in PFLEGETHEMEN:
         return {"error": f"Nicht unterstütztes Thema: {thema}"}
@@ -163,23 +196,42 @@ def generate_post(thema: str, platformen: list[str], num: int) -> dict[str, Any]
 
     client = OpenAI()
     posts: list[dict[str, Any]] = []
+    warnings: list[str] = []
 
     for platform in selected_in_order:
         prompt = _build_prompt(thema=thema, platform=platform, num=clamped_num)
-        completion = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Du bist ein erfahrener Content-Redakteur für Pflegekommunikation.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.8,
-        )
+        try:
+            completion = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Du bist ein erfahrener Content-Redakteur für Pflegekommunikation.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.8,
+            )
+        except Exception as exc:
+            return _build_openai_error_response(exc=exc, platform=platform)
 
-        response_text = completion.choices[0].message.content or ""
+        choices = getattr(completion, "choices", None) or []
+        if not choices or not getattr(choices[0], "message", None):
+            return {"error": "Keine verwertbare Antwort von OpenAI erhalten."}
+
+        response_text = choices[0].message.content or ""
+        if not response_text.strip():
+            return {"error": "OpenAI hat keinen Inhalt zurückgegeben."}
+
         blocks = [block.strip() for block in response_text.split("---") if block.strip()]
+
+        if len(blocks) < clamped_num:
+            warnings.append(
+                (
+                    f"{platform}: Angefordert wurden {clamped_num} Varianten, "
+                    f"aber nur {len(blocks)} gültige Block/Blöcke erkannt."
+                )
+            )
 
         for variant_index, block in enumerate(blocks[:clamped_num]):
             posts.append(
@@ -191,7 +243,10 @@ def generate_post(thema: str, platformen: list[str], num: int) -> dict[str, Any]
                 )
             )
 
-    return {"posts": posts}
+    result: dict[str, Any] = {"posts": posts}
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 def main() -> None:
@@ -217,6 +272,9 @@ def main() -> None:
         if "error" in result:
             st.error(result["error"])
             return
+
+        for warning in result.get("warnings", []):
+            st.warning(warning)
 
         for post in result["posts"]:
             st.subheader(f"{post['platform']} · Variante {post['variant_index'] + 1}")

@@ -203,7 +203,14 @@ def generate_post(thema: str, platformen: list[str], num: int) -> dict[str, Any]
         except Exception as exc:
             return _build_openai_error_response(exc=exc, platform=platform)
 
-        response_text = completion.choices[0].message.content or ""
+        choices = getattr(completion, "choices", None) or []
+        if not choices or not getattr(choices[0], "message", None):
+            return {"error": "Keine verwertbare Antwort von OpenAI erhalten."}
+
+        response_text = choices[0].message.content or ""
+        if not response_text.strip():
+            return {"error": "OpenAI hat keinen Inhalt zurückgegeben."}
+
         blocks = [block.strip() for block in response_text.split("---") if block.strip()]
 
         for variant_index, block in enumerate(blocks[:clamped_num]):

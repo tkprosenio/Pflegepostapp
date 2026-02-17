@@ -52,15 +52,21 @@ PLATTFORMEN: dict[str, str] = {
 
 PLATFORM_ORDER: tuple[str, ...] = ("TikTok", "Instagram", "Facebook")
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if os.path.exists(".env"):
+def get_openai_api_key() -> str:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if api_key:
+        return api_key
+
+    if not os.path.exists(".env"):
+        return ""
+
     try:
         from dotenv import load_dotenv
-
-        load_dotenv()
-        OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     except ImportError:
-        pass
+        return ""
+
+    load_dotenv()
+    return os.getenv("OPENAI_API_KEY") or ""
 
 
 def _split_csv_like(value: str) -> list[str]:
@@ -197,13 +203,14 @@ def generate_post(thema: str, platformen: list[str], num: int) -> dict[str, Any]
     if unsupported:
         return {"error": f"Nicht unterstützte Plattform(en): {', '.join(unsupported)}"}
 
-    if not OPENAI_API_KEY:
+    api_key = get_openai_api_key()
+    if not api_key:
         return {"error": "OPENAI_API_KEY fehlt. Bitte in der Umgebung setzen."}
 
     clamped_num = max(3, min(5, num))
     selected_in_order = [platform for platform in PLATFORM_ORDER if platform in set(platformen)]
 
-    client = OpenAI(api_key=OPENAI_API_KEY)
+    client = OpenAI(api_key=api_key)
     posts: list[dict[str, Any]] = []
     warnings: list[str] = []
 
@@ -261,7 +268,9 @@ def generate_post(thema: str, platformen: list[str], num: int) -> dict[str, Any]
 def main() -> None:
     st.title("🤖 Pflege-Post Generator")
 
-    if not OPENAI_API_KEY:
+    api_key = get_openai_api_key()
+
+    if not api_key:
         st.error(
             "❌ OPENAI_API_KEY fehlt.\n"
             "Lokal: .env mit OPENAI_API_KEY anlegen.\n"
@@ -276,7 +285,8 @@ def main() -> None:
     num = st.slider("Anzahl Varianten pro Plattform", min_value=3, max_value=5, value=3)
 
     if st.button("Posts generieren"):
-        if not OPENAI_API_KEY:
+        api_key = get_openai_api_key()
+        if not api_key:
             st.error("Generierung übersprungen: OPENAI_API_KEY fehlt.")
             return
 

@@ -1,10 +1,16 @@
+"""
+Pflege-Post Generator
+Local: Use .env file with OPENAI_API_KEY
+Cloud: Set OPENAI_API_KEY in Streamlit Cloud Secrets tab
+"""
+
 import json
 import os
 import re
 from typing import Any
 
+import openai
 import streamlit as st
-from dotenv import load_dotenv
 from openai import OpenAI
 
 PFLEGETHEMEN: dict[str, str] = {
@@ -46,8 +52,6 @@ PLATTFORMEN: dict[str, str] = {
 }
 
 PLATFORM_ORDER: tuple[str, ...] = ("TikTok", "Instagram", "Facebook")
-
-load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 
@@ -187,18 +191,26 @@ def generate_post(thema: str, platformen: list[str], num: int) -> dict[str, Any]
 def main() -> None:
     st.title("🤖 Pflege-Post Generator")
 
-    if not OPENAI_API_KEY:
-        st.error("OPENAI_API_KEY fehlt. Bitte Umgebungsvariable setzen, dann die Seite neu laden.")
+    if st.button("Cache leeren"):
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        st.success("✅ Cache wurde geleert.")
+
+    # Für Streamlit Cloud: API-Key aus Secrets/Umgebungsvariablen lesen.
+    global OPENAI_API_KEY
+    openai.api_key = os.environ.get("OPENAI_API_KEY")
+    OPENAI_API_KEY = openai.api_key
+    if not openai.api_key:
+        st.error("❌ OPENAI_API_KEY missing! Set it in Streamlit Cloud > Manage app > Secrets tab.")
+        st.stop()
+
+    st.success("✅ OpenAI ready!")
 
     thema = st.selectbox("Pflege-Thema", options=list(PFLEGETHEMEN.keys()))
     platformen = st.multiselect("Plattformen", options=list(PLATTFORMEN.keys()))
     num = st.slider("Anzahl Varianten pro Plattform", min_value=3, max_value=5, value=3)
 
     if st.button("Posts generieren"):
-        if not OPENAI_API_KEY:
-            st.error("Generierung übersprungen: OPENAI_API_KEY fehlt.")
-            return
-
         result = generate_post(thema=thema, platformen=platformen, num=num)
         if "error" in result:
             st.error(result["error"])
@@ -212,6 +224,10 @@ def main() -> None:
             st.markdown(f"**Hashtags:** {' '.join(post['hashtags'])}")
             st.markdown(f"**Emojis:** {' '.join(post['emojis'])}")
             st.markdown(f"**CTA:** {post['cta']}")
+
+            post_json = json.dumps(post, ensure_ascii=False, indent=2)
+            st.code(post_json, language="json")
+            st.caption("📋 JSON über das Kopier-Symbol rechts oben im Codeblock kopieren.")
             st.divider()
 
         st.json(result)

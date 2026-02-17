@@ -153,6 +153,7 @@ def generate_post(thema: str, platformen: list[str], num: int) -> dict[str, Any]
 
     client = OpenAI()
     posts: list[dict[str, Any]] = []
+    warnings: list[str] = []
 
     for platform in selected_in_order:
         prompt = _build_prompt(thema=thema, platform=platform, num=clamped_num)
@@ -171,6 +172,14 @@ def generate_post(thema: str, platformen: list[str], num: int) -> dict[str, Any]
         response_text = completion.choices[0].message.content or ""
         blocks = [block.strip() for block in response_text.split("---") if block.strip()]
 
+        if len(blocks) < clamped_num:
+            warnings.append(
+                (
+                    f"{platform}: Angefordert wurden {clamped_num} Varianten, "
+                    f"aber nur {len(blocks)} gültige Block/Blöcke erkannt."
+                )
+            )
+
         for variant_index, block in enumerate(blocks[:clamped_num]):
             posts.append(
                 _parse_variant_block(
@@ -181,7 +190,10 @@ def generate_post(thema: str, platformen: list[str], num: int) -> dict[str, Any]
                 )
             )
 
-    return {"posts": posts}
+    result: dict[str, Any] = {"posts": posts}
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 def main() -> None:
@@ -203,6 +215,9 @@ def main() -> None:
         if "error" in result:
             st.error(result["error"])
             return
+
+        for warning in result.get("warnings", []):
+            st.warning(warning)
 
         for post in result["posts"]:
             st.subheader(f"{post['platform']} · Variante {post['variant_index'] + 1}")

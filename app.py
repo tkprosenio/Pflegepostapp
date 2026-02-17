@@ -5,7 +5,7 @@ from typing import Any
 
 import streamlit as st
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import APIConnectionError, APIStatusError, AuthenticationError, OpenAI, RateLimitError
 
 PFLEGETHEMEN: dict[str, str] = {
     "Demenz": (
@@ -134,6 +134,38 @@ def _build_prompt(thema: str, platform: str, num: int) -> str:
     )
 
 
+def _build_openai_error_response(exc: Exception, platform: str) -> dict[str, str]:
+    debug_hint = f"[{type(exc).__name__}]"
+
+    if isinstance(exc, AuthenticationError):
+        message = (
+            "Die Anfrage an OpenAI konnte nicht authentifiziert werden. "
+            "Bitte API-Schlüssel prüfen und erneut versuchen."
+        )
+    elif isinstance(exc, RateLimitError):
+        message = (
+            "Zu viele Anfragen in kurzer Zeit. "
+            "Bitte kurz warten und die Generierung erneut starten."
+        )
+    elif isinstance(exc, APIConnectionError):
+        message = (
+            "Verbindungsproblem zur OpenAI-API. "
+            "Bitte Internetverbindung prüfen und erneut versuchen."
+        )
+    elif isinstance(exc, APIStatusError):
+        message = (
+            "OpenAI konnte die Anfrage aktuell nicht verarbeiten. "
+            "Bitte später erneut versuchen."
+        )
+    else:
+        message = "Die Anfrage an OpenAI ist fehlgeschlagen. Bitte erneut versuchen."
+
+    return {
+        "error": f"{message} (Plattform: {platform}, Hinweis: {debug_hint})",
+        "debug": str(exc),
+    }
+
+
 def generate_post(thema: str, platformen: list[str], num: int) -> dict[str, Any]:
     if thema not in PFLEGETHEMEN:
         return {"error": f"Nicht unterstütztes Thema: {thema}"}
@@ -156,17 +188,20 @@ def generate_post(thema: str, platformen: list[str], num: int) -> dict[str, Any]
 
     for platform in selected_in_order:
         prompt = _build_prompt(thema=thema, platform=platform, num=clamped_num)
-        completion = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Du bist ein erfahrener Content-Redakteur für Pflegekommunikation.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.8,
-        )
+        try:
+            completion = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Du bist ein erfahrener Content-Redakteur für Pflegekommunikation.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.8,
+            )
+        except Exception as exc:
+            return _build_openai_error_response(exc=exc, platform=platform)
 
         response_text = completion.choices[0].message.content or ""
         blocks = [block.strip() for block in response_text.split("---") if block.strip()]

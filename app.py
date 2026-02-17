@@ -61,13 +61,21 @@ def _split_csv_like(value: str) -> list[str]:
 def _normalize_hashtags(value: str) -> list[str]:
     tags = _split_csv_like(value)
     normalized: list[str] = []
+    seen: set[str] = set()
     for tag in tags:
         clean = tag.strip()
         if not clean:
             continue
-        if not clean.startswith("#"):
-            clean = f"#{clean.lstrip('#')}"
-        normalized.append(clean)
+        token = re.sub(r"^#+", "", clean).strip()
+        token = re.sub(r"[\s,;|]+", "", token)
+        if not token or not re.search(r"\w", token):
+            continue
+
+        normalized_tag = f"#{token}"
+        if normalized_tag in seen:
+            continue
+        seen.add(normalized_tag)
+        normalized.append(normalized_tag)
     return normalized
 
 

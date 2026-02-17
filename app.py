@@ -11,7 +11,13 @@ from typing import Any
 
 import openai
 import streamlit as st
-from openai import OpenAI
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    AuthenticationError,
+    OpenAI,
+    RateLimitError,
+)
 
 PFLEGETHEMEN: dict[str, str] = {
     "Demenz": (
@@ -196,14 +202,10 @@ def main() -> None:
         st.cache_resource.clear()
         st.success("✅ Cache wurde geleert.")
 
-    # Für Streamlit Cloud: API-Key aus Secrets/Umgebungsvariablen lesen.
-    global OPENAI_API_KEY
-    openai.api_key = os.environ.get("OPENAI_API_KEY")
-    OPENAI_API_KEY = openai.api_key
-    if not openai.api_key:
-        st.error("❌ OPENAI_API_KEY missing! Set it in Streamlit Cloud > Manage app > Secrets tab.")
+    if not OPENAI_API_KEY:
+        st.error("❌ OPENAI_API_KEY missing! Set in Streamlit Cloud > Manage app > Secrets.")
         st.stop()
-
+    openai.api_key = OPENAI_API_KEY
     st.success("✅ OpenAI ready!")
 
     thema = st.selectbox("Pflege-Thema", options=list(PFLEGETHEMEN.keys()))

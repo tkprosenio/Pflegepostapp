@@ -1,46 +1,124 @@
 # Pflegepostapp
 
-## Zweck
-Die Pflegepostapp unterstützt dabei, **deutschsprachige Social-Media-Postings** für Pflegethemen (z. B. Demenz, Sturzprophylaxe, pflegende Angehörige) zu erstellen.
-Die App nutzt Streamlit für die Oberfläche und OpenAI für die Textgenerierung.
+Pflegepostapp ist eine Streamlit-Anwendung zur **mehrstufigen (Multi-Agent) Erstellung von deutschsprachigen Social-Media-Posts** rund um Pflegethemen.
+Die App nutzt CrewAI, Pydantic-Validierung und ein umschaltbares LLM-Backend für A/B-Tests von Tonalität und Empathie.
 
-Start der App lokal:
+## Features
 
-```bash
-streamlit run app.py
-```
+- **Multi-Agent Workflow mit CrewAI**
+  - Brand & Topic Strategist
+  - SGB XI Legal Checker
+  - Social Media Creator
+- **Dynamische Modellwahl in der UI**
+  - `gpt-4o-mini` (OpenAI)
+  - `gemini-1.5-flash` (Google)
+- **Strukturierte Ausgaben mit Pydantic**
+  - `PostVariant`
+  - `PlatformPosts`
+  - `CrewOutput`
+- **Brand-spezifische Tonalität** über vordefinierte Brand-Profile.
+- **Session-State-basierte Ergebnis-Persistenz** (`st.session_state.generated_posts`), damit UI-Interaktionen (z. B. Download) die Generierung nicht erneut starten.
+- **JSON-Download** der generierten Ergebnisse.
 
-## Lokales Setup
-1. Python-Umgebung aktivieren (optional, aber empfohlen).
-2. Abhängigkeiten installieren:
+## Tech Stack
+
+- Python
+- Streamlit
+- CrewAI
+- LangChain Provider-Integrationen:
+  - `langchain-openai`
+  - `langchain-google-genai`
+- Pydantic
+- python-dotenv
+
+## Voraussetzungen
+
+- Python 3.10+
+- API-Zugriff auf mindestens **einen** Provider:
+  - OpenAI für `gpt-4o-mini`
+  - Google Generative AI für `gemini-1.5-flash`
+
+## Installation
 
 ```bash
 pip install -r requirements.txt
 ```
 
-3. API-Key setzen.
-   - Optional über eine `.env` im Projektverzeichnis:
+## Konfiguration der API-Keys
+
+Die App liest API-Keys aus:
+
+1. Umgebungsvariablen
+2. optional `.env`
+3. Streamlit Secrets (`st.secrets`)
+
+### Lokal per `.env`
 
 ```env
 OPENAI_API_KEY=...
+GOOGLE_API_KEY=...
 ```
 
-   - Alternativ direkt als Umgebungsvariable im Terminal setzen.
+> Hinweis: In der Praxis muss nur der Key vorhanden sein, der zum gewählten Modell passt.
 
-## Streamlit Cloud Setup
-Wenn die App auf Streamlit Cloud läuft, den API-Key in den Secrets hinterlegen:
-
-1. **Manage app** öffnen.
-2. **Secrets** auswählen.
-3. Folgenden Eintrag speichern:
+### Streamlit Cloud Secrets
 
 ```toml
 OPENAI_API_KEY="..."
+GOOGLE_API_KEY="..."
+```
+
+## App starten
+
+```bash
+streamlit run app.py
+```
+
+## Nutzung
+
+1. In der Sidebar Modell wählen (`gpt-4o-mini` oder `gemini-1.5-flash`).
+2. Brand auswählen.
+3. Thema, Plattformen und Variantenanzahl festlegen.
+4. **Posts generieren** klicken.
+5. Ergebnisse ansehen und als JSON herunterladen.
+
+## Ausgabeformat (vereinfacht)
+
+```json
+{
+  "results": [
+    {
+      "platform_name": "Instagram",
+      "variants": [
+        {
+          "title": "...",
+          "body": "...",
+          "hashtags": ["#..."],
+          "emojis": ["💙"],
+          "cta": "..."
+        }
+      ]
+    }
+  ]
+}
 ```
 
 ## Troubleshooting
-- **Fehler: `OPENAI_API_KEY fehlt`**  
-  Prüfen, ob der Key lokal als Umgebungsvariable oder in `.env` gesetzt ist.
 
-- **Deployment funktioniert lokal, aber nicht in Streamlit Cloud (oder umgekehrt)**  
-  Meist liegt ein Umgebungs-Mismatch vor (lokale `.env` vs. Cloud-Secrets). Sicherstellen, dass in der jeweiligen Laufumgebung `OPENAI_API_KEY` korrekt gesetzt ist.
+- **`OPENAI_API_KEY fehlt`**
+  - Modell `gpt-4o-mini` ist ausgewählt, aber OpenAI-Key fehlt.
+
+- **`GOOGLE_API_KEY fehlt`**
+  - Modell `gemini-1.5-flash` ist ausgewählt, aber Google-Key fehlt.
+
+- **`ModuleNotFoundError: No module named 'crewai'`**
+  - Abhängigkeiten neu installieren:
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+## Projektstruktur
+
+- `app.py` – Streamlit UI, CrewAI Orchestrierung, Pydantic Output-Verarbeitung
+- `requirements.txt` – Laufzeitabhängigkeiten
+- `README.md` – Projektdokumentation

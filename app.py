@@ -1,16 +1,18 @@
 import json
 import os
-import re
 from typing import Any
 
 import streamlit as st
-from openai import (
-    APIConnectionError,
-    APIStatusError,
-    AuthenticationError,
-    OpenAI,
-    RateLimitError,
-)
+from crewai import Agent, Crew, Process, Task
+from pydantic import BaseModel, Field
+
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - optional dependency at runtime
+    load_dotenv = None
+
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 
 PFLEGETHEMEN: dict[str, str] = {
     "Demenz": (
@@ -37,7 +39,7 @@ PFLEGETHEMEN: dict[str, str] = {
 
 PLATTFORMEN: dict[str, str] = {
     "TikTok": (
-        "Kurz, dynamisch, hook in der ersten Zeile, leicht verständlich, aktivierende Sprache, "
+        "Kurz, dynamisch, Hook in der ersten Zeile, leicht verständlich, aktivierende Sprache, "
         "praxisnahe Tipps, trendige aber seriöse Ansprache."
     ),
     "Instagram": (
@@ -50,268 +52,277 @@ PLATTFORMEN: dict[str, str] = {
     ),
 }
 
-PLATFORM_ORDER: tuple[str, ...] = ("TikTok", "Instagram", "Facebook")
-
-def get_openai_api_key() -> str:
-    api_key = os.getenv("OPENAI_API_KEY")
-    if api_key:
-        return api_key
-
-    if not os.path.exists(".env"):
-        return ""
-
-    try:
-        from dotenv import load_dotenv
-    except ImportError:
-        return ""
-
-    load_dotenv()
-    return os.getenv("OPENAI_API_KEY") or ""
-
-
-def _split_csv_like(value: str) -> list[str]:
-    parts = [part.strip() for part in re.split(r"[,;|]", value) if part.strip()]
-    if parts:
-        return parts
-    return [token for token in value.split() if token.strip()]
-
-
-def _normalize_hashtags(value: str) -> list[str]:
-    tags = _split_csv_like(value)
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for tag in tags:
-        clean = tag.strip()
-        if not clean:
-            continue
-        token = re.sub(r"^#+", "", clean).strip()
-        token = re.sub(r"[\s,;|]+", "", token)
-        if not token or not re.search(r"\w", token):
-            continue
-
-        normalized_tag = f"#{token}"
-        if normalized_tag in seen:
-            continue
-        seen.add(normalized_tag)
-        normalized.append(normalized_tag)
-    return normalized
+BRANDS = {
+    "Pflegebox": {
+        "ton": "pragmatisch, verlässlich, entlastend, unkompliziert, sachlich",
+        "ansprache": "formell aber nahbar ('Sie')",
+        "keywords": ["#Pflegebox", "#Pflegehilfsmittel", "#PflegeZuHause", "#Entlastung"],
+        "usp": "Kostenfreie Lieferung von Pflegehilfsmitteln, Übernahme des Papierkrams (§40 SGB XI)",
+    },
+    "Sanubi": {
+        "ton": "professionell, kompetent, modern, lösungsorientiert, klinisch-sauber",
+        "ansprache": "respektvoll auf Augenhöhe ('Sie')",
+        "keywords": ["#Sanubi", "#Gesundheit", "#PflegeQualität", "#PremiumService"],
+        "usp": "Ganzheitliches, hochwertiges Gesundheitserlebnis und smarte Lösungen für Pflegebedürftige",
+    },
+    "deinePflege": {
+        "ton": "persönlich, empathisch, ermutigend, nahbar, Startup-Vibe, warm",
+        "ansprache": "konsequentes, freundschaftliches ('Du')",
+        "keywords": ["#deinePflege", "#PflegeDigital", "#GemeinsamStark", "#PflegeAlltag"],
+        "usp": "Digitale Pflegeorganisation per App, Entbürokratisierung, Empowerment der Angehörigen",
+    },
+    "Pflege-durch-Angehörige": {
+        "ton": "hochinformativ, aufklärend, schützend, mentor-haft, tiefgründig",
+        "ansprache": "formell und respektvoll ('Sie')",
+        "keywords": ["#PflegeDurchAngehörige", "#PflegeWissen", "#PflegeTipps", "#Pflegegrad"],
+        "usp": "Tiefgreifendes Informationsportal, Insider-Wissen, rechtliche Aufklärung und Checklisten",
+    },
+}
 
 
-def _normalize_emojis(value: str) -> list[str]:
-    return _split_csv_like(value)
+class PostVariant(BaseModel):
+    title: str = Field(..., description="Kurze Überschrift")
+    body: str = Field(..., description="Post-Text mit 2-5 Sätzen")
+    hashtags: list[str] = Field(default_factory=list)
+    emojis: list[str] = Field(default_factory=list)
+    cta: str = Field(..., description="Klare Handlungsaufforderung")
 
 
-def _extract_prefixed_value(block: str, prefix: str) -> str:
-    pattern = re.compile(rf"^{re.escape(prefix)}\s*(.+)$", flags=re.IGNORECASE | re.MULTILINE)
-    match = pattern.search(block)
-    if match:
-        return match.group(1).strip()
-
-    for line in block.splitlines():
-        normalized = line.strip()
-        if normalized.lower().startswith(prefix.lower().rstrip(":")):
-            return normalized.split(":", 1)[1].strip() if ":" in normalized else ""
-    return ""
+class PlatformPosts(BaseModel):
+    platform_name: str
+    variants: list[PostVariant]
 
 
-def _parse_variant_block(block: str, platform: str, thema: str, variant_index: int) -> dict[str, Any]:
-    cleaned = block.strip()
-    title = _extract_prefixed_value(cleaned, "Title:")
-    body = _extract_prefixed_value(cleaned, "Body:")
-    hashtags_raw = _extract_prefixed_value(cleaned, "Hashtags:")
-    emojis_raw = _extract_prefixed_value(cleaned, "Emojis:")
-    cta = _extract_prefixed_value(cleaned, "CTA:")
-
-    if not body:
-        lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
-        if len(lines) > 1:
-            body = "\n".join(lines[1:])
-        elif lines:
-            body = lines[0]
-
-    return {
-        "platform": platform,
-        "title": title,
-        "body": body,
-        "hashtags": _normalize_hashtags(hashtags_raw),
-        "emojis": _normalize_emojis(emojis_raw),
-        "cta": cta,
-        "topic": thema,
-        "variant_index": variant_index,
-    }
+class CrewOutput(BaseModel):
+    results: list[PlatformPosts]
 
 
-def _build_prompt(thema: str, platform: str, num: int) -> str:
-    themen_fakten = PFLEGETHEMEN[thema]
-    style = PLATTFORMEN[platform]
-    return (
-        "Erstelle deutschsprachige Social-Media-Posts mit fachlich korrekter, alltagstauglicher Pflegekommunikation.\n"
-        f"Thema: {thema}\n"
-        f"Faktenbasis: {themen_fakten}\n"
-        f"Plattform: {platform}\n"
-        f"Stil: {style}\n\n"
-        f"Erzeuge exakt {num} Varianten.\n"
-        "WICHTIG: Gib ausschließlich Blöcke in folgendem Format aus, Blöcke jeweils mit --- trennen:\n"
-        "Title: <kurze Überschrift>\n"
-        "Body: <2-5 Sätze>\n"
-        "Hashtags: <durch Komma getrennt, mit #>\n"
-        "Emojis: <passende Emojis, durch Komma getrennt>\n"
-        "CTA: <klare Handlungsaufforderung>\n"
-    )
+def get_api_keys() -> tuple[str, str]:
+    openai_key = os.getenv("OPENAI_API_KEY", "")
+    google_key = os.getenv("GOOGLE_API_KEY", "")
+
+    if load_dotenv and (not openai_key or not google_key):
+        load_dotenv()
+        openai_key = openai_key or os.getenv("OPENAI_API_KEY", "")
+        google_key = google_key or os.getenv("GOOGLE_API_KEY", "")
+
+    if not openai_key:
+        openai_key = st.secrets.get("OPENAI_API_KEY", "") if hasattr(st, "secrets") else ""
+    if not google_key:
+        google_key = st.secrets.get("GOOGLE_API_KEY", "") if hasattr(st, "secrets") else ""
+
+    return openai_key, google_key
 
 
-def _build_openai_error_response(exc: Exception, platform: str) -> dict[str, str]:
-    debug_hint = f"[{type(exc).__name__}]"
-
-    if isinstance(exc, AuthenticationError):
-        message = (
-            "Die Anfrage an OpenAI konnte nicht authentifiziert werden. "
-            "Bitte API-Schlüssel prüfen und erneut versuchen."
-        )
-    elif isinstance(exc, RateLimitError):
-        message = (
-            "Zu viele Anfragen in kurzer Zeit. "
-            "Bitte kurz warten und die Generierung erneut starten."
-        )
-    elif isinstance(exc, APIConnectionError):
-        message = (
-            "Verbindungsproblem zur OpenAI-API. "
-            "Bitte Internetverbindung prüfen und erneut versuchen."
-        )
-    elif isinstance(exc, APIStatusError):
-        message = (
-            "OpenAI konnte die Anfrage aktuell nicht verarbeiten. "
-            "Bitte später erneut versuchen."
-        )
-    else:
-        message = "Die Anfrage an OpenAI ist fehlgeschlagen. Bitte erneut versuchen."
-
-    return {
-        "error": f"{message} (Plattform: {platform}, Hinweis: {debug_hint})",
-        "debug": str(exc),
-    }
-
-
-def generate_post(thema: str, platformen: list[str], num: int) -> dict[str, Any]:
+def run_crewai_generation(
+    thema: str,
+    platformen: list[str],
+    num_variants: int,
+    brand_name: str,
+    selected_model_name: str,
+    openai_key: str,
+    google_key: str,
+) -> dict[str, Any]:
     if thema not in PFLEGETHEMEN:
-        return {"error": f"Nicht unterstütztes Thema: {thema}"}
-
+        raise ValueError(f"Nicht unterstütztes Thema: {thema}")
+    if brand_name not in BRANDS:
+        raise ValueError(f"Nicht unterstützte Marke: {brand_name}")
     if not platformen:
-        return {"error": "Bitte mindestens eine Plattform auswählen."}
+        raise ValueError("Bitte mindestens eine Plattform auswählen.")
 
     unsupported = [platform for platform in platformen if platform not in PLATTFORMEN]
     if unsupported:
-        return {"error": f"Nicht unterstützte Plattform(en): {', '.join(unsupported)}"}
+        raise ValueError(f"Nicht unterstützte Plattform(en): {', '.join(unsupported)}")
 
-    api_key = get_openai_api_key()
-    if not api_key:
-        return {"error": "OPENAI_API_KEY fehlt. Bitte in der Umgebung setzen."}
+    if selected_model_name == "gpt-4o-mini":
+        llm = ChatOpenAI(model="gpt-4o-mini", api_key=openai_key, temperature=0.7)
+    elif selected_model_name == "gemini-1.5-flash":
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-1.5-flash",
+            google_api_key=google_key,
+            temperature=0.7,
+        )
+    else:
+        raise ValueError(f"Nicht unterstütztes Modell: {selected_model_name}")
 
-    clamped_num = max(3, min(5, num))
-    selected_in_order = [platform for platform in PLATFORM_ORDER if platform in set(platformen)]
+    brand_info = BRANDS[brand_name]
+    platform_guidelines = {name: PLATTFORMEN[name] for name in platformen}
 
-    client = OpenAI(api_key=api_key)
-    posts: list[dict[str, Any]] = []
-    warnings: list[str] = []
+    strategist = Agent(
+        role="Brand & Topic Strategist",
+        goal="Entwickle eine markenkonforme, empathische und fachlich saubere Content-Strategie.",
+        backstory=(
+            "Du bist Experte für Pflegekommunikation und Markenton. "
+            "Du bereitest den Content-Brief für Social-Media-Teams vor."
+        ),
+        llm=llm,
+        verbose=False,
+    )
 
-    for platform in selected_in_order:
-        prompt = _build_prompt(thema=thema, platform=platform, num=clamped_num)
-        try:
-            completion = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "Du bist ein erfahrener Content-Redakteur für Pflegekommunikation.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.8,
-            )
-        except Exception as exc:
-            return _build_openai_error_response(exc=exc, platform=platform)
+    legal_checker = Agent(
+        role="SGB XI Legal Checker",
+        goal="Prüfe Aussagen auf rechtliche Plausibilität und sichere Formulierungen.",
+        backstory=(
+            "Du kennst SGB XI Grundlagen, vermeidest rechtliche Übertreibungen "
+            "und machst Inhalte compliant und verantwortungsvoll."
+        ),
+        llm=llm,
+        verbose=False,
+    )
 
-        choices = getattr(completion, "choices", None) or []
-        if not choices or not getattr(choices[0], "message", None):
-            return {"error": "Keine verwertbare Antwort von OpenAI erhalten."}
+    creator = Agent(
+        role="Social Media Creator",
+        goal="Erstelle plattformspezifische Post-Varianten in strikt strukturiertem JSON.",
+        backstory=(
+            "Du erstellst performante, empathische und markenkonforme Pflege-Posts mit klaren CTAs."
+        ),
+        llm=llm,
+        verbose=False,
+    )
 
-        response_text = choices[0].message.content or ""
-        if not response_text.strip():
-            return {"error": "OpenAI hat keinen Inhalt zurückgegeben."}
+    strategy_task = Task(
+        description=(
+            "Erstelle einen kompakten Marken- und Themenbriefingtext für die Content-Produktion.\n"
+            f"Marke: {brand_name}\n"
+            f"Brand-Details: {json.dumps(brand_info, ensure_ascii=False)}\n"
+            f"Thema: {thema}\n"
+            f"Faktenbasis: {PFLEGETHEMEN[thema]}\n"
+            f"Plattformen: {', '.join(platformen)}\n"
+            "Definiere Kernbotschaften, Tonalität, Do's/Don'ts, und Plattform-Fokus."
+        ),
+        expected_output="Ein präzises Briefing mit Kernbotschaften, Tonalität und Plattformhinweisen.",
+        agent=strategist,
+    )
 
-        blocks = [block.strip() for block in response_text.split("---") if block.strip()]
+    legal_task = Task(
+        description=(
+            "Prüfe das Briefing auf rechtliche Risiken und SGB XI Sensibilität. "
+            "Formuliere sichere, klare Leitlinien (keine Rechtsberatung versprechen, keine absoluten Zusagen)."
+        ),
+        expected_output="Compliant-Leitlinien für die finale Content-Erstellung.",
+        agent=legal_checker,
+        context=[strategy_task],
+    )
 
-        if len(blocks) < clamped_num:
-            warnings.append(
-                (
-                    f"{platform}: Angefordert wurden {clamped_num} Varianten, "
-                    f"aber nur {len(blocks)} gültige Block/Blöcke erkannt."
-                )
-            )
+    final_description = (
+        "Erzeuge finale Social-Media-Posts als STRICT JSON passend zu CrewOutput Schema.\n"
+        f"Anzahl Varianten pro Plattform: {num_variants}\n"
+        f"Plattform-Richtlinien: {json.dumps(platform_guidelines, ensure_ascii=False)}\n"
+        f"Brand Keywords (nach Möglichkeit einbauen): {', '.join(brand_info['keywords'])}\n"
+        "Antworte ausschließlich als valides JSON Objekt im CrewOutput-Format."
+    )
 
-        for variant_index, block in enumerate(blocks[:clamped_num]):
-            posts.append(
-                _parse_variant_block(
-                    block=block,
-                    platform=platform,
-                    thema=thema,
-                    variant_index=variant_index,
-                )
-            )
+    try:
+        final_task = Task(
+            description=final_description,
+            expected_output="JSON gemäß CrewOutput mit results/platform_name/variants.",
+            agent=creator,
+            context=[strategy_task, legal_task],
+            output_json=CrewOutput,
+        )
+    except TypeError:
+        final_task = Task(
+            description=final_description,
+            expected_output="JSON gemäß CrewOutput mit results/platform_name/variants.",
+            agent=creator,
+            context=[strategy_task, legal_task],
+            output_pydantic=CrewOutput,
+        )
 
-    result: dict[str, Any] = {"posts": posts}
-    if warnings:
-        result["warnings"] = warnings
-    return result
+    crew = Crew(
+        agents=[strategist, legal_checker, creator],
+        tasks=[strategy_task, legal_task, final_task],
+        process=Process.sequential,
+        verbose=False,
+    )
+
+    try:
+        kickoff_result = crew.kickoff()
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"CrewAI-Ausführung fehlgeschlagen: {exc}") from exc
+
+    payload: Any = kickoff_result
+    if hasattr(kickoff_result, "pydantic") and getattr(kickoff_result, "pydantic") is not None:
+        payload = kickoff_result.pydantic
+    elif hasattr(kickoff_result, "json_dict") and getattr(kickoff_result, "json_dict") is not None:
+        payload = kickoff_result.json_dict
+    elif hasattr(kickoff_result, "raw") and isinstance(kickoff_result.raw, str):
+        payload = json.loads(kickoff_result.raw)
+
+    if isinstance(payload, CrewOutput):
+        return payload.model_dump()
+    if isinstance(payload, dict):
+        return CrewOutput.model_validate(payload).model_dump()
+    if isinstance(payload, str):
+        return CrewOutput.model_validate(json.loads(payload)).model_dump()
+
+    raise RuntimeError("CrewAI lieferte kein verwertbares strukturiertes Ergebnis.")
+
+
+def render_posts(data: dict[str, Any]) -> None:
+    results = data.get("results", [])
+    if not results:
+        st.info("Noch keine Posts vorhanden.")
+        return
+
+    for platform_block in results:
+        st.subheader(platform_block["platform_name"])
+        for idx, variant in enumerate(platform_block.get("variants", []), start=1):
+            with st.container(border=True):
+                st.markdown(f"**Variante {idx}: {variant['title']}**")
+                st.write(variant["body"])
+                st.markdown(f"**Hashtags:** {' '.join(variant.get('hashtags', []))}")
+                st.markdown(f"**Emojis:** {' '.join(variant.get('emojis', []))}")
+                st.markdown(f"**CTA:** {variant.get('cta', '')}")
 
 
 def main() -> None:
-    st.title("🤖 Pflege-Post Generator")
+    st.set_page_config(page_title="Pflegepostapp", page_icon="🤖", layout="wide")
+    st.title("🤖 Pflegepostapp · Multi-Agent Social Media Generator")
 
-    api_key = get_openai_api_key()
+    if "generated_posts" not in st.session_state:
+        st.session_state.generated_posts = None
 
-    if not api_key:
-        st.error(
-            "❌ OPENAI_API_KEY fehlt.\n"
-            "Lokal: .env mit OPENAI_API_KEY anlegen.\n"
-            "Cloud: In Streamlit → Manage app → Secrets setzen."
-        )
+    openai_key, google_key = get_api_keys()
+
+    with st.sidebar:
+        st.header("Konfiguration")
+        selected_model_name = st.selectbox("KI-Modell", ["gpt-4o-mini", "gemini-1.5-flash"])
+        brand_name = st.selectbox("Brand", options=list(BRANDS.keys()))
+        thema = st.selectbox("Thema", options=list(PFLEGETHEMEN.keys()))
+        platformen = st.multiselect("Plattformen", options=list(PLATTFORMEN.keys()), default=["Instagram"])
+        num_variants = st.slider("Varianten pro Plattform", min_value=1, max_value=5, value=3)
+
+    if selected_model_name == "gpt-4o-mini" and not openai_key:
+        st.error("OPENAI_API_KEY fehlt. Bitte in Umgebungsvariablen oder Streamlit-Secrets setzen.")
         st.stop()
 
-    st.success("✅ OpenAI bereit!")
+    if selected_model_name == "gemini-1.5-flash" and not google_key:
+        st.error("GOOGLE_API_KEY fehlt. Bitte in Umgebungsvariablen oder Streamlit-Secrets setzen.")
+        st.stop()
 
-    thema = st.selectbox("Pflege-Thema", options=list(PFLEGETHEMEN.keys()))
-    platformen = st.multiselect("Plattformen", options=list(PLATTFORMEN.keys()))
-    num = st.slider("Anzahl Varianten pro Plattform", min_value=3, max_value=5, value=3)
+    if st.button("Posts generieren", type="primary"):
+        with st.spinner("CrewAI erstellt Ihre Posts..."):
+            try:
+                result = run_crewai_generation(
+                    thema=thema,
+                    platformen=platformen,
+                    num_variants=num_variants,
+                    brand_name=brand_name,
+                    selected_model_name=selected_model_name,
+                    openai_key=openai_key,
+                    google_key=google_key,
+                )
+                st.session_state.generated_posts = result
+                st.success("Posts erfolgreich generiert.")
+            except Exception as exc:  # noqa: BLE001
+                st.error(str(exc))
 
-    if st.button("Posts generieren"):
-        api_key = get_openai_api_key()
-        if not api_key:
-            st.error("Generierung übersprungen: OPENAI_API_KEY fehlt.")
-            return
-
-        result = generate_post(thema=thema, platformen=platformen, num=num)
-        if "error" in result:
-            st.error(result["error"])
-            return
-
-        for warning in result.get("warnings", []):
-            st.warning(warning)
-
-        for post in result["posts"]:
-            st.subheader(f"{post['platform']} · Variante {post['variant_index'] + 1}")
-            st.markdown(f"**Thema:** {post['topic']}")
-            st.markdown(f"**Title:** {post['title']}")
-            st.markdown(f"**Body:**\n{post['body']}")
-            st.markdown(f"**Hashtags:** {' '.join(post['hashtags'])}")
-            st.markdown(f"**Emojis:** {' '.join(post['emojis'])}")
-            st.markdown(f"**CTA:** {post['cta']}")
-            st.divider()
-
-        st.json(result)
+    if st.session_state.generated_posts:
+        render_posts(st.session_state.generated_posts)
         st.download_button(
             label="JSON herunterladen",
-            data=json.dumps(result, ensure_ascii=False, indent=2),
+            data=json.dumps(st.session_state.generated_posts, ensure_ascii=False, indent=2),
             file_name="pflege_posts.json",
             mime="application/json",
         )
